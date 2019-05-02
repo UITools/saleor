@@ -1,44 +1,90 @@
-from __future__ import unicode_literals
-
 from django import forms
-from django.db.models import Q
-from django.utils.translation import ugettext_lazy as _
+from django.utils.translation import pgettext_lazy
+
+from ...account.models import CustomerNote, User
 
 
-class CustomerSearchForm(forms.Form):
-    email = forms.CharField(required=False, label=_('Email'))
-    name = forms.CharField(required=False, label=_('Name'))
-    order_status = forms.BooleanField(required=False, initial=True,
-                                      label=_('With open orders'))
+def get_name_placeholder(name):
+    return pgettext_lazy(
+        'Customer form: Name field placeholder',
+        '%(name)s (Inherit from default billing address)') % {
+            'name': name}
+
+
+class CustomerDeleteForm(forms.Form):
 
     def __init__(self, *args, **kwargs):
-        self.queryset = kwargs.pop('queryset')
-        super(CustomerSearchForm, self).__init__(*args, **kwargs)
+        self.instance = kwargs.pop('instance')
+        self.user = kwargs.pop('user')
+        super().__init__(*args, **kwargs)
 
     def clean(self):
-        data = self.cleaned_data
-        for field in ['email', 'name']:
-            data[field] = data[field].strip()
+        data = super().clean()
+        if not self.instance.is_staff:
+            return data
+
+        if self.instance == self.user:
+            raise forms.ValidationError(pgettext_lazy(
+                'Edit customer details in order form error',
+                'You can\'t delete your own account via dashboard, '
+                'please try from the storefront.'))
+        if self.instance.is_superuser:
+            raise forms.ValidationError(pgettext_lazy(
+                'Edit customer details in order form error',
+                'Only superuser can delete his own account.'))
+        can_manage_staff_users = self.user.has_perm('account.manage_staff')
+        if not can_manage_staff_users:
+            raise forms.ValidationError(pgettext_lazy(
+                'Edit customer details in order form error',
+                'You have insufficient permissions, to edit staff users.'))
         return data
 
-    def search(self):
-        queryset = self.queryset
-        data = self.cleaned_data
-        if data['email']:
-            queryset = queryset.filter(email__icontains=data['email'])
-        if data['name']:
-            parts = data['name'].split()
-            if len(parts) == 2:
-                query = ((Q(addresses__first_name__icontains=parts[0]) |
-                          Q(addresses__last_name__icontains=parts[1])) |
-                         (Q(addresses__first_name__icontains=parts[1]) |
-                          Q(addresses__last_name__icontains=parts[0])))
-            else:
-                query = (Q(addresses__first_name__icontains=data['name']) |
-                         Q(addresses__last_name__icontains=data['name']))
-            queryset = queryset.filter(query).distinct()
-        if data['order_status']:
-            open_order = ['new', 'payment-pending', 'fully-paid']
-            queryset = queryset.filter(orders__status__in=open_order)
 
-        return queryset
+class CustomerForm(forms.ModelForm):
+    def __init__(self, *args, **kwargs):
+        # The user argument is required
+        self.user = kwargs.pop('user')
+        super().__init__(*args, **kwargs)
+
+        # Disable editing following fields if user edits his own account
+        if self.user == self.instance:
+            self.fields['note'].disabled = True
+            self.fields['is_active'].disabled = True
+
+        address = self.instance.default_billing_address
+        if not address:
+            return
+        if address.first_name:
+            placeholder = get_name_placeholder(address.first_name)
+            self.fields['first_name'].widget.attrs['placeholder'] = placeholder
+        if address.last_name:
+            placeholder = get_name_placeholder(address.last_name)
+            self.fields['last_name'].widget.attrs['placeholder'] = placeholder
+
+    class Meta:
+        model = User
+        fields = ['first_name', 'last_name', 'email', 'note', 'is_active']
+        labels = {
+            'first_name': pgettext_lazy(
+                'Customer form: Given name field', 'Given name'),
+            'last_name': pgettext_lazy(
+                'Customer form: Family name field', 'Family name'),
+            'email': pgettext_lazy(
+                'Customer form: email address field', 'Email'),
+            'note': pgettext_lazy(
+                'Customer form: customer note field', 'Notes'),
+            'is_active': pgettext_lazy(
+                'Customer form: is active toggle', 'User is active')}
+
+
+class CustomerNoteForm(forms.ModelForm):
+    class Meta:
+        model = CustomerNote
+        fields = ['content', 'is_public']
+        widget = {
+            'content': forms.Textarea()}
+        labels = {
+            'content': pgettext_lazy('Customer note', 'Note'),
+            'is_public': pgettext_lazy(
+                'Allow customers to see note toggle',
+                'Customer can see this note')}

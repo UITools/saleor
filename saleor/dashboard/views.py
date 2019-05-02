@@ -1,68 +1,59 @@
 from django.conf import settings
-from django.contrib.admin.views.decorators import staff_member_required \
-    as _staff_member_required
+from django.contrib.admin.views.decorators import (
+    staff_member_required as _staff_member_required, user_passes_test)
+from django.contrib.auth import REDIRECT_FIELD_NAME
 from django.db.models import Q, Sum
 from django.template.response import TemplateResponse
-from django.utils.decorators import method_decorator
-from django.views.generic.edit import FormMixin
 
-from ..order.models import Order, Payment
+from ..order.models import Order
+from ..payment import ChargeStatus
+from ..payment.models import Payment
 from ..product.models import Product
-from saleor.dashboard.order.forms import OrderFilterForm
 
 
 def staff_member_required(f):
-    return _staff_member_required(f, login_url='registration:login')
+    return _staff_member_required(f, login_url='account:login')
 
 
-class StaffMemberOnlyMixin(object):
-    @method_decorator(staff_member_required)
-    def dispatch(self, *args, **kwargs):
-        return super(StaffMemberOnlyMixin, self).dispatch(*args, **kwargs)
+def superuser_required(
+        view_func=None, redirect_field_name=REDIRECT_FIELD_NAME,
+        login_url='account:login'):
+    """Check if the user is logged in and is a superuser.
 
-
-class FilterByStatusMixin(FormMixin):
-    form_class = OrderFilterForm
-
-    def __init__(self):
-        super(FilterByStatusMixin, self).__init__()
-        self.active_filter = None
-
-    def get_queryset(self):
-        queryset = super(FilterByStatusMixin, self).get_queryset()
-        active_filter = self.request.GET.get('status')
-        if active_filter:
-            self.active_filter = active_filter
-            queryset = queryset.filter(status=self.active_filter)
-        return queryset
-
-    def get_initial(self):
-        initial = super(FilterByStatusMixin, self).get_initial()
-        if self.active_filter:
-            initial['status'] = self.active_filter
-        return initial
-
-    def get_context_data(self):
-        ctx = super(FilterByStatusMixin, self).get_context_data()
-        ctx['form'] = self.get_form()
-        return ctx
+    Otherwise redirects to the login page.
+    """
+    actual_decorator = user_passes_test(
+        lambda u: u.is_active and u.is_superuser,
+        login_url=login_url,
+        redirect_field_name=redirect_field_name)
+    if view_func:
+        return actual_decorator(view_func)
+    return actual_decorator
 
 
 @staff_member_required
 def index(request):
-    orders_to_ship = Order.objects.filter(status='fully-paid')
-    orders_to_ship = (orders_to_ship
-                      .select_related('user')
-                      .prefetch_related('groups', 'groups__items', 'payments'))
-    payments = Payment.objects.filter(status='preauth').order_by('-created')
+    paginate_by = 10
+    orders_to_ship = Order.objects.ready_to_fulfill().select_related(
+        'user').prefetch_related('lines', 'payments')
+    payments = Payment.objects.filter(
+        is_active=True, charge_status=ChargeStatus.NOT_CHARGED
+    ).order_by('-created')
     payments = payments.select_related('order', 'order__user')
     low_stock = get_low_stock_products()
-    ctx = {'preauthorized_payments': payments, 'orders_to_ship': orders_to_ship,
-           'low_stock': low_stock}
+    ctx = {'preauthorized_payments': payments[:paginate_by],
+           'orders_to_ship': orders_to_ship[:paginate_by],
+           'low_stock': low_stock[:paginate_by]}
     return TemplateResponse(request, 'dashboard/index.html', ctx)
+
+
+@staff_member_required
+def styleguide(request):
+    return TemplateResponse(request, 'dashboard/styleguide/index.html', {})
 
 
 def get_low_stock_products():
     threshold = getattr(settings, 'LOW_STOCK_THRESHOLD', 10)
-    products = Product.objects.annotate(total_stock=Sum('variants__stock__quantity'))
+    products = Product.objects.annotate(
+        total_stock=Sum('variants__quantity'))
     return products.filter(Q(total_stock__lte=threshold)).distinct()

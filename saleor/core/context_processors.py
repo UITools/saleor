@@ -1,7 +1,5 @@
 from django.conf import settings
 
-from ..product.models import Category
-
 
 def get_setting_as_dict(name, short_name=None):
     short_name = short_name or name
@@ -11,13 +9,11 @@ def get_setting_as_dict(name, short_name=None):
         return {}
 
 
-def canonical_hostname(request):
-    return get_setting_as_dict('CANONICAL_HOSTNAME')
-
-
+# request is a required parameter
+# pylint: disable=W0613
 def default_currency(request):
     return get_setting_as_dict('DEFAULT_CURRENCY')
 
 
-def categories(request):
-    return {'categories': Category.tree.root_nodes().filter(hidden=False)}
+def search_enabled(request):
+    return {'SEARCH_IS_ENABLED': settings.ENABLE_SEARCH}
